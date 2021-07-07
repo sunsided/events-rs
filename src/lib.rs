@@ -18,36 +18,29 @@ pub struct EventHandler {
 /// When the handle is dropped, the registration is revoked.
 #[derive(Default)]
 pub struct Handle {
-    handle: Option<usize>,
+    /// The key in the map.
+    key: usize,
+    /// Pointer to the map that (possibly) contains the key.
     pointer: Weak<MapLocked>,
 }
 
 impl Handle {
-    fn new(handle: Option<usize>, pointer: Weak<MapLocked>) -> Self {
-        Self { handle, pointer }
+    /// Initializes a new `Handle` from a successful registration.
+    fn new(key: usize, pointer: Weak<MapLocked>) -> Self {
+        Self { key, pointer }
     }
 
     /// Determines whether the registration is still valid.
     pub fn is_valid(&self) -> bool {
         self.pointer.strong_count() > 0
     }
-
-    /// Determines whether this an event was newly registered or
-    /// already existed.
-    pub fn is_new(&self) -> bool {
-        self.handle.is_some()
-    }
 }
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        if self.handle.is_none() {
-            return;
-        }
-
-        if let Some(map) = self.pointer.upgrade() {
-            let mut guard = map.write().unwrap();
-            guard.remove(&self.handle.unwrap());
+        if let Some(lock) = self.pointer.upgrade() {
+            let mut handlers = lock.write().unwrap();
+            handlers.remove(&self.key);
         }
     }
 }
@@ -64,20 +57,20 @@ impl EventHandler {
     }
 
     #[must_use = "this handle must be held alive for as long as the event should be used"]
-    pub fn add(&mut self, handler: Box<EventHandlerDelegate>) -> Handle {
+    pub fn add(&mut self, handler: Box<EventHandlerDelegate>) -> Result<Handle, String> {
         let p_handler: usize = (&handler as *const _) as usize;
-        let entry = HandlerEntry { handler };
-        let mut guard = self.handlers.write().unwrap();
+        let mut handlers = self.handlers.write().unwrap();
         let weak_ptr = Arc::downgrade(&self.handlers);
-        match guard.insert(p_handler, entry) {
-            None => Handle::new(Some(p_handler), weak_ptr),
-            Some(_) => Handle::new(None, weak_ptr),
+        let entry = HandlerEntry { handler };
+        match handlers.insert(p_handler, entry) {
+            None => Ok(Handle::new(p_handler, weak_ptr)),
+            Some(_) => Err(String::from("The handler was already registered")),
         }
     }
 
     pub fn invoke(&self) {
-        let guard = self.handlers.read().unwrap();
-        for (_, entry) in guard.iter() {
+        let handlers = self.handlers.read().unwrap();
+        for (_, entry) in handlers.iter() {
             (entry.handler)();
         }
     }
@@ -96,17 +89,17 @@ mod tests {
     }
 
     #[test]
+    #[allow(unused_variables)]
     fn can_add_unknown_handlers() {
         let mut handler = EventHandler::new();
-        let handle = handler.add(Box::new(|| dummy()));
-        assert_eq!(handle.is_new(), true);
+        let handle = handler.add(Box::new(|| dummy())).unwrap();
         assert_eq!(handler.len(), 1);
     }
 
     #[test]
     fn can_remove_handlers() {
         let mut handler = EventHandler::new();
-        let handle = handler.add(Box::new(|| dummy()));
+        let handle = handler.add(Box::new(|| dummy())).unwrap();
         assert_eq!(handler.len(), 1);
         drop(handle);
         assert_eq!(handler.len(), 0);
