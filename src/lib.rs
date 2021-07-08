@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock, Weak};
 
-type FnEventHandlerDelegate = dyn Fn();
+type FnEventHandlerDelegate = fn() -> ();
 
 /// A key entry for a handler.
 #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Copy, Clone)]
 enum HandlerKey {
     PtrOfBox(usize),
+    FunctionPointer(usize),
 }
 
 /// Hashing for `HandlerKey` instances.
@@ -15,13 +16,15 @@ impl Hash for HandlerKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             HandlerKey::PtrOfBox(ptr) => ptr.hash(state),
+            HandlerKey::FunctionPointer(ptr) => ptr.hash(state),
         }
     }
 }
 
 /// A concrete type of a handler.
 enum HandlerType {
-    DynFn(Box<FnEventHandlerDelegate>),
+    BoxedClosure(Box<dyn Fn()>),
+    Function(FnEventHandlerDelegate),
 }
 
 /// The actual storage type.
@@ -72,6 +75,29 @@ impl EventHandler {
         }
     }
 
+    fn add_fn<T>(&mut self, handler: Box<T>) -> Result<Handle, String>
+    where
+        T: Fn() + 'static,
+    {
+        let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
+        let mut handlers = self.handlers.write().unwrap();
+        let entry = HandlerType::BoxedClosure(handler);
+        match handlers.insert(key, entry) {
+            None => Ok(Handle::new(key, Arc::downgrade(&self.handlers))),
+            Some(_) => Err(String::from("The handler was already registered")),
+        }
+    }
+
+    fn add_ptr(&mut self, handler: FnEventHandlerDelegate) -> Result<Handle, String> {
+        let key = HandlerKey::FunctionPointer((&handler as *const _) as usize);
+        let mut handlers = self.handlers.write().unwrap();
+        let entry = HandlerType::Function(handler);
+        match handlers.insert(key, entry) {
+            None => Ok(Handle::new(key, Arc::downgrade(&self.handlers))),
+            Some(_) => Err(String::from("The handler was already registered")),
+        }
+    }
+
     /// Returns the number of currently registered handlers.
     pub fn len(&self) -> usize {
         self.handlers.read().unwrap().len()
@@ -83,7 +109,8 @@ impl EventHandler {
         let handlers = self.handlers.read().unwrap();
         for (_, entry) in handlers.iter() {
             match &entry {
-                HandlerType::DynFn(fun) => fun(),
+                HandlerType::BoxedClosure(fun) => fun(),
+                HandlerType::Function(fun) => fun(),
             }
         }
     }
@@ -93,18 +120,6 @@ impl EventHandler {
 pub trait AddHandler<T> {
     #[must_use = "this handle must be held alive for as long as the event should be used"]
     fn add(&mut self, handler: T) -> Result<Handle, String>;
-}
-
-impl AddHandler<Box<FnEventHandlerDelegate>> for EventHandler {
-    fn add(&mut self, handler: Box<FnEventHandlerDelegate>) -> Result<Handle, String> {
-        let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
-        let mut handlers = self.handlers.write().unwrap();
-        let entry = HandlerType::DynFn(handler);
-        match handlers.insert(key, entry) {
-            None => Ok(Handle::new(key, Arc::downgrade(&self.handlers))),
-            Some(_) => Err(String::from("The handler was already registered")),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -124,17 +139,34 @@ mod tests {
 
     #[test]
     #[allow(unused_variables)]
-    fn can_add_unknown_handlers() {
+    fn can_add_closure() {
         let mut handler = EventHandler::new();
-        let handle = handler.add(Box::new(|| dummy())).unwrap();
+        let handle = handler.add_fn(Box::new(|| dummy())).unwrap();
         assert_eq!(handler.len(), 1);
         handler.invoke();
     }
 
     #[test]
+    #[allow(unused_variables)]
+    fn can_add_function_pointer() {
+        let mut handler = EventHandler::new();
+        let handle = handler.add_ptr(dummy).unwrap();
+        assert_eq!(handler.len(), 1);
+        handler.invoke();
+    }
+
+    #[test]
+    #[allow(unused_variables)]
+    fn cannot_register_same_function_twice() {
+        let mut handler = EventHandler::new();
+        let handle = handler.add_ptr(dummy).unwrap();
+        assert!(handler.add_ptr(dummy).is_err());
+    }
+
+    #[test]
     fn can_remove_handlers() {
         let mut handler = EventHandler::new();
-        let handle = handler.add(Box::new(|| dummy())).unwrap();
+        let handle = handler.add_fn(Box::new(|| dummy())).unwrap();
         assert_eq!(handler.len(), 1);
         drop(handle);
         assert_eq!(handler.len(), 0);
@@ -159,7 +191,7 @@ mod tests {
 
         let value2 = value.clone();
         let handle = handler
-            .add(Box::new(move || do_something(value2.clone())))
+            .add_fn(Box::new(move || do_something(value2.clone())))
             .unwrap();
 
         handler.invoke();
