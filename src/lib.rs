@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock, Weak};
@@ -23,8 +24,9 @@ impl Hash for HandlerKey {
 
 /// A concrete type of a handler.
 enum HandlerType {
-    BoxedClosure(Box<dyn Fn()>),
-    Function(FnEventHandlerDelegate),
+    BoxedFn(Box<dyn Fn()>),
+    BoxedFnOnce(Cell<Option<Box<dyn FnOnce()>>>),
+    Function(fn() -> ()),
 }
 
 /// The actual storage type.
@@ -77,11 +79,24 @@ impl EventHandler {
 
     fn add_fn<T>(&mut self, handler: Box<T>) -> Result<Handle, String>
     where
-        T: Fn() + 'static,
+        T: Fn() -> () + 'static,
     {
         let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
         let mut handlers = self.handlers.write().unwrap();
-        let entry = HandlerType::BoxedClosure(handler);
+        let entry = HandlerType::BoxedFn(handler);
+        match handlers.insert(key, entry) {
+            None => Ok(Handle::new(key, Arc::downgrade(&self.handlers))),
+            Some(_) => Err(String::from("The handler was already registered")),
+        }
+    }
+
+    fn add_fnonce<T>(&mut self, handler: Box<T>) -> Result<Handle, String>
+    where
+        T: FnOnce() -> () + 'static,
+    {
+        let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
+        let mut handlers = self.handlers.write().unwrap();
+        let entry = HandlerType::BoxedFnOnce(Cell::new(Some(handler)));
         match handlers.insert(key, entry) {
             None => Ok(Handle::new(key, Arc::downgrade(&self.handlers))),
             Some(_) => Err(String::from("The handler was already registered")),
@@ -106,11 +121,30 @@ impl EventHandler {
     /// Invokes the event.
     // TODO: Add event data and sender information.
     pub fn invoke(&self) {
-        let handlers = self.handlers.read().unwrap();
-        for (_, entry) in handlers.iter() {
-            match &entry {
-                HandlerType::BoxedClosure(fun) => fun(),
-                HandlerType::Function(fun) => fun(),
+        let mut unregister_list = Vec::new();
+
+        {
+            let handlers = self.handlers.read().unwrap();
+            for (key, entry) in handlers.iter() {
+                match &entry {
+                    HandlerType::Function(fun) => fun(),
+                    HandlerType::BoxedFn(fun) => fun(),
+                    HandlerType::BoxedFnOnce(cell) => {
+                        let fun = cell.replace(None);
+                        if fun.is_some() {
+                            (fun.unwrap())();
+                        }
+                        unregister_list.push(key.clone());
+                    }
+                }
+            }
+        }
+
+        // Clean up after any FnOnce type.
+        if !unregister_list.is_empty() {
+            let mut handlers = self.handlers.write().unwrap();
+            for key in unregister_list {
+                handlers.remove(&key);
             }
         }
     }
@@ -139,11 +173,21 @@ mod tests {
 
     #[test]
     #[allow(unused_variables)]
-    fn can_add_closure() {
+    fn can_add_fn() {
         let mut handler = EventHandler::new();
         let handle = handler.add_fn(Box::new(|| dummy())).unwrap();
         assert_eq!(handler.len(), 1);
         handler.invoke();
+    }
+
+    #[test]
+    #[allow(unused_variables)]
+    fn can_add_fnonce() {
+        let mut handler = EventHandler::new();
+        let handle = handler.add_fnonce(Box::new(dummy)).unwrap();
+        assert_eq!(handler.len(), 1);
+        handler.invoke();
+        assert_eq!(handler.len(), 0);
     }
 
     #[test]
