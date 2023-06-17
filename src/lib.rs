@@ -1,9 +1,18 @@
+#![forbid(unsafe_code)]
+#![forbid(unused_must_use)]
+
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock, Weak};
 
-type FnEventHandlerDelegate = fn() -> ();
+/// Alias for trivial function pointers.
+pub type FnEventHandlerDelegate = fn() -> ();
+
+/// An event registration.
+pub struct EventHandler {
+    handlers: Arc<MapLocked>,
+}
 
 /// A key entry for a handler.
 #[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Copy, Clone)]
@@ -35,13 +44,9 @@ type MapInner = BTreeMap<HandlerKey, HandlerType>;
 /// Helper type declaration for a locked `MapInner`.
 type MapLocked = RwLock<MapInner>;
 
-/// An event registration.
-pub struct EventHandler {
-    handlers: Arc<MapLocked>,
-}
-
 /// A handle to a registration.
 /// When the handle is dropped, the registration is revoked.
+#[must_use = "This handle must be held alive for as long as the event should be used."]
 pub struct Handle {
     /// The key in the map.
     key: HandlerKey,
@@ -77,10 +82,11 @@ impl EventHandler {
         }
     }
 
-    fn add_fn<T>(&mut self, handler: Box<T>) -> Result<Handle, String>
+    pub fn add_fn<T>(&mut self, handler: T) -> Result<Handle, String>
     where
         T: Fn() -> () + 'static,
     {
+        let handler = Box::new(handler);
         let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
         let mut handlers = self.handlers.write().unwrap();
         let entry = HandlerType::BoxedFn(handler);
@@ -90,10 +96,11 @@ impl EventHandler {
         }
     }
 
-    fn add_fnonce<T>(&mut self, handler: Box<T>) -> Result<Handle, String>
+    pub fn add_fnonce<T>(&mut self, handler: T) -> Result<Handle, String>
     where
         T: FnOnce() -> () + 'static,
     {
+        let handler = Box::new(handler);
         let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
         let mut handlers = self.handlers.write().unwrap();
         let entry = HandlerType::BoxedFnOnce(Cell::new(Some(handler)));
@@ -103,7 +110,7 @@ impl EventHandler {
         }
     }
 
-    fn add_ptr(&mut self, handler: FnEventHandlerDelegate) -> Result<Handle, String> {
+    pub fn add_ptr(&mut self, handler: FnEventHandlerDelegate) -> Result<Handle, String> {
         let key = HandlerKey::FunctionPointer((&handler as *const _) as usize);
         let mut handlers = self.handlers.write().unwrap();
         let entry = HandlerType::Function(handler);
@@ -150,9 +157,14 @@ impl EventHandler {
     }
 }
 
+impl Default for EventHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Provides functionality to register a handler.
 pub trait AddHandler<T> {
-    #[must_use = "this handle must be held alive for as long as the event should be used"]
     fn add(&mut self, handler: T) -> Result<Handle, String>;
 }
 

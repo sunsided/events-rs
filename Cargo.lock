@@ -3,5 +3,5 @@
 version = 3
 
 [[package]]
-name = "events-rs"
+name = "event-handler"
 version = "0.1.0"
