@@ -1,6 +1,10 @@
 [package]
 name = "event-handler"
 version = "0.1.0"
+description = "Event invocation utilities"
+repository = "https://github.com/sunsided/events-rs"
+authors = ["Markus Mayer"]
+keywords = ["events"]
+license-file = "LICENSE.md"
 edition = "2021"
-
-[dependencies]
+rust-version = "1.68.0"
