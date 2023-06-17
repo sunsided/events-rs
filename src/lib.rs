@@ -3,8 +3,15 @@
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, RwLock, Weak};
+
+pub mod prelude {
+    pub use crate::{EventHandler, Handle, Invoke};
+}
 
 /// Alias for trivial function pointers.
 pub type FnEventHandlerDelegate<TEventArgs> = fn(TEventArgs) -> ();
@@ -25,8 +32,14 @@ enum HandlerKey {
 impl Hash for HandlerKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
-            HandlerKey::PtrOfBox(ptr) => ptr.hash(state),
-            HandlerKey::FunctionPointer(ptr) => ptr.hash(state),
+            HandlerKey::PtrOfBox(ptr) => {
+                let address = ptr as *const usize as usize;
+                address.hash(state)
+            }
+            HandlerKey::FunctionPointer(ptr) => {
+                let address = ptr as *const usize as usize;
+                address.hash(state)
+            }
         }
     }
 }
@@ -42,7 +55,7 @@ enum HandlerType<TEventArgs> {
 type MapInner<TEventArgs> = BTreeMap<HandlerKey, HandlerType<TEventArgs>>;
 
 /// Helper type declaration for a locked `MapInner`.
-type MapLocked<TEventArgs> = RwLock<MapInner<TEventArgs>>;
+struct MapLocked<TEventArgs>(RwLock<MapInner<TEventArgs>>);
 
 /// A handle to a registration.
 /// When the handle is dropped, the registration is revoked.
@@ -64,7 +77,41 @@ impl<TEventArgs> Handle<TEventArgs> {
     pub fn is_valid(&self) -> bool {
         self.pointer.strong_count() > 0
     }
+
+    /// Invokes the event with the specified arguments.
+    ///
+    /// ## Arguments
+    /// * `args` - The event arguments to pass.
+    pub fn invoke(&self, args: TEventArgs) -> Result<(), EventInvocationError>
+    where
+        TEventArgs: Clone,
+    {
+        if let Some(ptr) = self.pointer.upgrade() {
+            ptr.invoke(args);
+            Ok(())
+        } else {
+            Err(EventInvocationError::EventDropped)
+        }
+    }
 }
+
+#[derive(Debug)]
+pub enum EventInvocationError {
+    EventDropped,
+}
+
+impl Display for EventInvocationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventInvocationError::EventDropped => write!(
+                f,
+                "Event could not be invoked because it was already dropped"
+            ),
+        }
+    }
+}
+
+impl Error for EventInvocationError {}
 
 impl<TEventArgs> Drop for Handle<TEventArgs> {
     fn drop(&mut self) {
@@ -76,7 +123,10 @@ impl<TEventArgs> Drop for Handle<TEventArgs> {
 }
 
 impl<TEventArgs> EventHandler<TEventArgs> {
-    pub fn new() -> Self {
+    pub fn new() -> Self
+    where
+        TEventArgs: Clone,
+    {
         Self {
             handlers: Arc::new(MapLocked::new(MapInner::new())),
         }
@@ -87,7 +137,7 @@ impl<TEventArgs> EventHandler<TEventArgs> {
         T: Fn(TEventArgs) -> () + 'static,
     {
         let handler = Box::new(handler);
-        let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
+        let key = HandlerKey::PtrOfBox((&*handler as *const _) as usize);
         let mut handlers = self.handlers.write().unwrap();
         let entry = HandlerType::BoxedFn(handler);
         match handlers.insert(key, entry) {
@@ -101,7 +151,7 @@ impl<TEventArgs> EventHandler<TEventArgs> {
         T: FnOnce(TEventArgs) -> () + 'static,
     {
         let handler = Box::new(handler);
-        let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
+        let key = HandlerKey::PtrOfBox((&*handler as *const _) as usize);
         let mut handlers = self.handlers.write().unwrap();
         let entry = HandlerType::BoxedFnOnce(Cell::new(Some(handler)));
         match handlers.insert(key, entry) {
@@ -110,7 +160,10 @@ impl<TEventArgs> EventHandler<TEventArgs> {
         }
     }
 
-    pub fn add_ptr(&mut self, handler: FnEventHandlerDelegate<TEventArgs>) -> Result<Handle<TEventArgs>, String> {
+    pub fn add_ptr(
+        &mut self,
+        handler: FnEventHandlerDelegate<TEventArgs>,
+    ) -> Result<Handle<TEventArgs>, String> {
         let key = HandlerKey::FunctionPointer((&handler as *const _) as usize);
         let mut handlers = self.handlers.write().unwrap();
         let entry = HandlerType::Function(handler);
@@ -126,12 +179,36 @@ impl<TEventArgs> EventHandler<TEventArgs> {
     }
 
     /// Invokes the event.
-    // TODO: Add event data and sender information.
-    pub fn invoke(&self, args: TEventArgs) where TEventArgs: Clone {
+    ///
+    /// ## Arguments
+    /// * `args` - The event arguments.
+    pub fn invoke(&self, args: TEventArgs)
+    where
+        TEventArgs: Clone,
+    {
+        self.handlers.invoke(args)
+    }
+}
+
+impl Default for EventHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<TEventArgs> MapLocked<TEventArgs>
+where
+    TEventArgs: Clone,
+{
+    const fn new(inner: MapInner<TEventArgs>) -> Self {
+        Self(RwLock::new(inner))
+    }
+
+    fn invoke(&self, args: TEventArgs) {
         let mut unregister_list = Vec::new();
 
         {
-            let handlers = self.handlers.read().unwrap();
+            let handlers = self.read().unwrap();
             for (key, entry) in handlers.iter() {
                 let args = args.clone();
                 match &entry {
@@ -150,7 +227,7 @@ impl<TEventArgs> EventHandler<TEventArgs> {
 
         // Clean up after any FnOnce type.
         if !unregister_list.is_empty() {
-            let mut handlers = self.handlers.write().unwrap();
+            let mut handlers = self.write().unwrap();
             for key in unregister_list {
                 handlers.remove(&key);
             }
@@ -158,9 +235,43 @@ impl<TEventArgs> EventHandler<TEventArgs> {
     }
 }
 
-impl Default for EventHandler {
-    fn default() -> Self {
-        Self::new()
+impl<TEventArgs> Deref for MapLocked<TEventArgs> {
+    type Target = RwLock<MapInner<TEventArgs>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<TEventArgs> DerefMut for MapLocked<TEventArgs> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// Provides the `invoke` function for an event.
+pub trait Invoke<TEventArgs>
+where
+    TEventArgs: Clone,
+{
+    fn invoke(&self, args: TEventArgs);
+}
+
+impl<TEventArgs> Invoke<TEventArgs> for EventHandler<TEventArgs>
+where
+    TEventArgs: Clone,
+{
+    fn invoke(&self, args: TEventArgs) {
+        self.invoke(args)
+    }
+}
+
+impl<TEventArgs> Invoke<TEventArgs> for Handle<TEventArgs>
+where
+    TEventArgs: Clone,
+{
+    fn invoke(&self, args: TEventArgs) {
+        self.invoke(args).ok();
     }
 }
 
