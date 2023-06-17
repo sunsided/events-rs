@@ -1,6 +1,6 @@
 [package]
 name = "event-handler"
-version = "0.1.0"
+version = "0.1.1"
 description = "Event invocation utilities"
 repository = "https://github.com/sunsided/events-rs"
 authors = ["Markus Mayer"]
