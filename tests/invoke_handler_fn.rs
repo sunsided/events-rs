@@ -16,15 +16,15 @@ fn it_works<'i>() {
 
     let value2 = value.clone();
     let _handle = handler
-        .add_fn(move || do_something(value2.clone()))
+        .add_fn(move |value| do_something(value2.clone(), value))
         .unwrap();
 
-    handler.invoke();
+    handler.invoke(42);
 
     assert_eq!(handler.len(), 1);
     assert_eq!(value.get(), 42);
 }
 
-fn do_something(ptr: Arc<Cell<i32>>) {
-    ptr.set(42);
+fn do_something(ptr: Arc<Cell<i32>>, amount: i32) {
+    ptr.set(amount);
 }

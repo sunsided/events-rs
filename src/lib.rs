@@ -7,11 +7,11 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock, Weak};
 
 /// Alias for trivial function pointers.
-pub type FnEventHandlerDelegate = fn() -> ();
+pub type FnEventHandlerDelegate<TEventArgs> = fn(TEventArgs) -> ();
 
 /// An event registration.
-pub struct EventHandler {
-    handlers: Arc<MapLocked>,
+pub struct EventHandler<TEventArgs = ()> {
+    handlers: Arc<MapLocked<TEventArgs>>,
 }
 
 /// A key entry for a handler.
@@ -32,31 +32,31 @@ impl Hash for HandlerKey {
 }
 
 /// A concrete type of a handler.
-enum HandlerType {
-    BoxedFn(Box<dyn Fn()>),
-    BoxedFnOnce(Cell<Option<Box<dyn FnOnce()>>>),
-    Function(fn() -> ()),
+enum HandlerType<TEventArgs> {
+    BoxedFn(Box<dyn Fn(TEventArgs)>),
+    BoxedFnOnce(Cell<Option<Box<dyn FnOnce(TEventArgs)>>>),
+    Function(FnEventHandlerDelegate<TEventArgs>),
 }
 
 /// The actual storage type.
-type MapInner = BTreeMap<HandlerKey, HandlerType>;
+type MapInner<TEventArgs> = BTreeMap<HandlerKey, HandlerType<TEventArgs>>;
 
 /// Helper type declaration for a locked `MapInner`.
-type MapLocked = RwLock<MapInner>;
+type MapLocked<TEventArgs> = RwLock<MapInner<TEventArgs>>;
 
 /// A handle to a registration.
 /// When the handle is dropped, the registration is revoked.
 #[must_use = "This handle must be held alive for as long as the event should be used."]
-pub struct Handle {
+pub struct Handle<TEventArgs> {
     /// The key in the map.
     key: HandlerKey,
     /// Pointer to the map that (possibly) contains the key.
-    pointer: Weak<MapLocked>,
+    pointer: Weak<MapLocked<TEventArgs>>,
 }
 
-impl Handle {
+impl<TEventArgs> Handle<TEventArgs> {
     /// Initializes a new `Handle` from a successful registration.
-    fn new(key: HandlerKey, pointer: Weak<MapLocked>) -> Self {
+    fn new(key: HandlerKey, pointer: Weak<MapLocked<TEventArgs>>) -> Self {
         Self { key, pointer }
     }
 
@@ -66,7 +66,7 @@ impl Handle {
     }
 }
 
-impl Drop for Handle {
+impl<TEventArgs> Drop for Handle<TEventArgs> {
     fn drop(&mut self) {
         if let Some(lock) = self.pointer.upgrade() {
             let mut handlers = lock.write().unwrap();
@@ -75,16 +75,16 @@ impl Drop for Handle {
     }
 }
 
-impl EventHandler {
+impl<TEventArgs> EventHandler<TEventArgs> {
     pub fn new() -> Self {
         Self {
             handlers: Arc::new(MapLocked::new(MapInner::new())),
         }
     }
 
-    pub fn add_fn<T>(&mut self, handler: T) -> Result<Handle, String>
+    pub fn add_fn<T>(&mut self, handler: T) -> Result<Handle<TEventArgs>, String>
     where
-        T: Fn() -> () + 'static,
+        T: Fn(TEventArgs) -> () + 'static,
     {
         let handler = Box::new(handler);
         let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
@@ -96,9 +96,9 @@ impl EventHandler {
         }
     }
 
-    pub fn add_fnonce<T>(&mut self, handler: T) -> Result<Handle, String>
+    pub fn add_fnonce<T>(&mut self, handler: T) -> Result<Handle<TEventArgs>, String>
     where
-        T: FnOnce() -> () + 'static,
+        T: FnOnce(TEventArgs) -> () + 'static,
     {
         let handler = Box::new(handler);
         let key = HandlerKey::PtrOfBox((&handler as *const _) as usize);
@@ -110,7 +110,7 @@ impl EventHandler {
         }
     }
 
-    pub fn add_ptr(&mut self, handler: FnEventHandlerDelegate) -> Result<Handle, String> {
+    pub fn add_ptr(&mut self, handler: FnEventHandlerDelegate<TEventArgs>) -> Result<Handle<TEventArgs>, String> {
         let key = HandlerKey::FunctionPointer((&handler as *const _) as usize);
         let mut handlers = self.handlers.write().unwrap();
         let entry = HandlerType::Function(handler);
@@ -127,19 +127,20 @@ impl EventHandler {
 
     /// Invokes the event.
     // TODO: Add event data and sender information.
-    pub fn invoke(&self) {
+    pub fn invoke(&self, args: TEventArgs) where TEventArgs: Clone {
         let mut unregister_list = Vec::new();
 
         {
             let handlers = self.handlers.read().unwrap();
             for (key, entry) in handlers.iter() {
+                let args = args.clone();
                 match &entry {
-                    HandlerType::Function(fun) => fun(),
-                    HandlerType::BoxedFn(fun) => fun(),
+                    HandlerType::Function(fun) => fun(args),
+                    HandlerType::BoxedFn(fun) => fun(args),
                     HandlerType::BoxedFnOnce(cell) => {
                         let fun = cell.replace(None);
                         if fun.is_some() {
-                            (fun.unwrap())();
+                            (fun.unwrap())(args);
                         }
                         unregister_list.push(key.clone());
                     }
@@ -163,52 +164,46 @@ impl Default for EventHandler {
     }
 }
 
-/// Provides functionality to register a handler.
-pub trait AddHandler<T> {
-    fn add(&mut self, handler: T) -> Result<Handle, String>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
 
-    fn dummy() {
+    fn dummy(_args: ()) {
         println!("Dummy called.");
     }
 
     #[test]
     fn new_handler_has_no_registrations() {
-        let handler = EventHandler::new();
+        let handler = EventHandler::<()>::new();
         assert_eq!(handler.len(), 0);
     }
 
     #[test]
     #[allow(unused_variables)]
     fn can_add_fn() {
-        let mut handler = EventHandler::new();
-        let handle = handler.add_fn(Box::new(|| dummy())).unwrap();
+        let mut handler = EventHandler::<()>::new();
+        let handle = handler.add_fn(dummy).unwrap();
         assert_eq!(handler.len(), 1);
-        handler.invoke();
+        handler.invoke(());
     }
 
     #[test]
     #[allow(unused_variables)]
     fn can_add_fnonce() {
         let mut handler = EventHandler::new();
-        let handle = handler.add_fnonce(Box::new(dummy)).unwrap();
+        let handle = handler.add_fnonce(dummy).unwrap();
         assert_eq!(handler.len(), 1);
-        handler.invoke();
+        handler.invoke(());
         assert_eq!(handler.len(), 0);
     }
 
     #[test]
     #[allow(unused_variables)]
     fn can_add_function_pointer() {
-        let mut handler = EventHandler::new();
+        let mut handler = EventHandler::<()>::new();
         let handle = handler.add_ptr(dummy).unwrap();
         assert_eq!(handler.len(), 1);
-        handler.invoke();
+        handler.invoke(());
     }
 
     #[test]
@@ -222,37 +217,9 @@ mod tests {
     #[test]
     fn can_remove_handlers() {
         let mut handler = EventHandler::new();
-        let handle = handler.add_fn(Box::new(|| dummy())).unwrap();
+        let handle = handler.add_fn(dummy).unwrap();
         assert_eq!(handler.len(), 1);
         drop(handle);
         assert_eq!(handler.len(), 0);
-    }
-
-    #[test]
-    #[allow(dead_code, unused_variables)]
-    fn it_works<'i>() {
-        let x = Box::new(0);
-        let y = Box::new(0);
-        let addr = *x as *const usize;
-        let addr2 = *x as *const usize;
-        let addr3 = *y as *const usize;
-        println!("{:?}", addr);
-
-        let mut handler = EventHandler::new();
-        let value = Arc::new(Cell::new(0));
-
-        fn do_something(ptr: Arc<Cell<i32>>) {
-            ptr.set(42);
-        }
-
-        let value2 = value.clone();
-        let handle = handler
-            .add_fn(Box::new(move || do_something(value2.clone())))
-            .unwrap();
-
-        handler.invoke();
-
-        assert_eq!(handler.len(), 1);
-        assert_eq!(value.get(), 42);
     }
 }
