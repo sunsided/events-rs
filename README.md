@@ -1,6 +1,6 @@
 # Event Handling
 
-An .NET `event`, `EventHandler` and `EventArgs` inspired event handling system.
+A .NET `event`, `EventHandler` and `EventArgs` inspired event handling system.
 
 ## Examples
 
